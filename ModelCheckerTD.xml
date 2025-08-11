@@ -1,0 +1,702 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE nta PUBLIC '-//Uppaal Team//DTD Flat System 1.6//EN' 'http://www.it.uu.se/research/group/darts/uppaal/flat-1_6.dtd'>
+<nta>
+	<declaration>// GAME CONFIG PARAMETERS
+const int nCells = 48;
+const int nCircles = 3;
+const int nSquares = 3;
+const int nEnemies = nCircles + nSquares;
+
+// ENEMY CONFIG PARAMETERS
+const int nEnemyTypes = 2;
+const int CIRCLE = 0;
+const int SQUARE = 1;
+const int Speed[nEnemyTypes]      = {1, 3};
+const int SpawnDelay[nEnemyTypes] = {2, 3};
+const int Health[nEnemyTypes]     = {10,20};
+const int Damage[nEnemyTypes]     = {2, 4};
+const int numOfType[nEnemyTypes]  = {nCircles, nSquares}; //number of each enemytype, for faster lookup in SpawnManager
+
+clock glob_clock; //For global timing verifications
+
+// CHANNELS
+urgent broadcast chan init_done;
+
+// MAIN TOWER 
+int main_tower_HP = 10;
+const int main_tower_pos[2] = {15,4};
+
+// GLOBAL ENEMY VARIABLES
+int enemy_pos[nEnemies];    //global position variable, position is given as index in path variable
+int enemy_health[nEnemies]; //global health variable, turret is targetable and alive if health &gt; 0
+int enemy_type[nEnemies];   //global path variable
+int num_dead_enem[nEnemyTypes] = {0,0}; //count of number of dead enemies, used for verifying win/loss
+
+//PATH DEFINITION
+const int path[nCells][2] = {
+    // up-right-up-right-right-down-MAIN
+    {0,0}, {0,1}, {0,2}, {0,3}, {0,4},
+    {1,4}, {2,4}, {3,4}, {4,4}, {5,4}, {6,4}, {7,4}, // make choise 
+    {7,5}, {7,6}, {7,7},
+    {8,7}, {9,7}, {10,7}, // make choise
+    {11,7}, {12,7}, {13,7}, {14,7}, {15,7},
+    {15,6}, {15,5}, {15,4},
+
+    // (up-right-up-right)-down-right-MAIN
+    {10,6}, {10,5}, {10,4},
+    {11,4}, {12,4}, {13,4}, {14,4}, {15,4},
+
+    // (up-right)-down-right-up-MAIN
+    {7,3}, {7,2}, {7,1},
+    {8,1}, {9,1}, {10,1}, {11,1}, {12,1}, {13,1}, {14,1}, {15,1},
+    {15,2}, {15,3}, {15,4}
+};
+
+const int crossroad[2] = {11, 17}; //indexes where enemy must make choise of direction 
+
+
+
+</declaration>
+	<template>
+		<name>TurretManager</name>
+		<declaration>// TURRET CONFIG PARAMETERS
+const int nTurretTypes = 3;
+const int BASIC = 0;
+const int CANNON = 1;
+const int SNIPER = 2;
+const int Range[nTurretTypes]     = {2, 1, 4};
+const int FireSpeed[nTurretTypes] = {2, 7, 20};
+const int TDamage[nTurretTypes]   = {2, 5, 8};
+
+//TO TEST THE DIFFERENT TURRET CONFIGURATION, COMMENT THE CORRECT SETUPS
+
+// turret configuration vanilla version(win)
+const int nTurrets = 7;
+const int turret_type[nTurrets]   = {BASIC, CANNON, CANNON, CANNON, CANNON, SNIPER, SNIPER}; //Turret types for the given setup with 7 turrets
+const int turret_pos[nTurrets][2] = {{5,5}, {8,2},  {8,6},  {14,2}, {14,6}, {2,3},  {11,5}}; //Turret position for the given setup with 7 turrets
+
+// turret configurations 1 (Win)
+//const int nTurrets = 7;
+//const int turret_type[nTurrets]   = {BASIC, BASIC, BASIC, BASIC, BASIC, BASIC, BASIC}; //Turret types for configuration 1
+//const int turret_pos[nTurrets][2] = {{5,5}, {8,2},  {8,6},  {14,2}, {14,6}, {2,3},  {11,5}}; //Turret position for configuration 1
+
+// turret configurations 2 (win)
+//const int nTurrets = 7;
+//const int turret_type[nTurrets]   = {SNIPER, SNIPER, SNIPER, SNIPER, SNIPER, SNIPER, SNIPER}; //Turret types for configuration 2
+//const int turret_pos[nTurrets][2] = {{5,5}, {8,2},  {8,6},  {14,2}, {14,6}, {2,3},  {11,5}}; //Turret position for configuration 2
+
+// turret configurations 3 (win)
+//const int nTurrets = 4;
+//const int turret_type[nTurrets]   = {BASIC, BASIC, BASIC, BASIC}; //Turret types for configuration 1
+//const int turret_pos[nTurrets][2] = {{5,5}, {8,2},  {8,6},  {14,2}}; //Turret position for configuration 1
+
+// turret configurations 3 (loss)
+//const int nTurrets = 2;
+//const int turret_type[nTurrets]   = {BASIC, BASIC}; //Turret types for configuration 1
+//const int turret_pos[nTurrets][2] = {{5,5}, {8,2}}; //Turret position for configuration 1
+
+
+//TURRET VARIABLES
+clock t;
+int  cooldown_time[nTurrets];       //overview of how long each turret has waited in cooldown. Is 0 if turret is not in cooldown
+bool turret_on_cooldown[nTurrets];  //overview of which turrets are in cooldown
+
+//On initialization, all local variables are set to zero
+void initialize(){
+    int i;
+    for(i=0; i&lt;nTurrets; i++){
+        turret_on_cooldown[i] = false;
+        cooldown_time[i] = 0;
+    }        
+}
+
+
+//updates the clock for all turrets in cooldown, if cooldown-limit is reached, remove turret from cooldown
+void updateTurretClockAndCooldown(){
+    //input: turret_on_cooldown, cooldown_time, FireSpeed,  
+    int i;
+    for(i=0; i&lt;nTurrets; i++){
+        if(turret_on_cooldown[i]){
+            cooldown_time[i]++;
+            if(cooldown_time[i] &gt; FireSpeed[turret_type[i]]){
+                cooldown_time[i] = 0;
+                turret_on_cooldown[i] = false;
+            }   
+        }        
+    }
+}
+
+//Checks if there exist a turret that can shoot an enemy
+bool turretCanShoot(){
+    //input: nTurrets, turret_on_cooldown, turret_type, turret_pos, Range, enemy_health, enemy_pos (path index), path
+    int i;
+    int j;
+    for(i=0; i&lt;nTurrets; i++){
+        if (!turret_on_cooldown[i]){
+            for(j=0; j&lt;nEnemies; j++){
+                if (enemy_health[j] &gt; 0){
+                    int type = turret_type[i];
+                    int x = turret_pos[i][0];
+                    int y = turret_pos[i][1];
+                    if (abs(x-path[enemy_pos[j]][0]) &lt;= Range[type] &amp;&amp; abs(y-path[enemy_pos[j]][1]) &lt;= Range[type]){
+                        return true;
+                    }
+                 }
+             }
+         }
+     }
+    return false;  
+}
+
+
+//iterate throug all turrets, and selects a target to shoot if possible
+void shootTurrets() {
+    //input: nTurrets, turret_on_cooldown, turret_type, turret_pos, Range, enemy_health, enemy_pos (path index), path, TDamage
+    int i, j;
+    //iterate through turrets
+    for (i = 0; i &lt; nTurrets; i++) {
+        if (!turret_on_cooldown[i]) {
+        int type = turret_type[i];
+        int tx = turret_pos[i][0];
+        int ty = turret_pos[i][1];
+
+        int bestEnemySquare = -1;
+        int bestDistSquare = 10000; //set arbitrary high
+
+        int bestEnemyCircle = -1;
+        int bestDistCircle = 10000;
+        
+        //iterate through live enemies
+        for (j = 0; j &lt; nEnemies; j++) {
+            if (enemy_health[j] &gt; 0) {
+                int ex = path[enemy_pos[j]][0];
+                int ey = path[enemy_pos[j]][1];
+
+                int dx = abs(ex - tx);
+                int dy = abs(ey - ty);
+
+                // Check if enemy is within turret range
+                if (dx &lt;= Range[type] &amp;&amp; dy &lt;= Range[type]) {
+                    int dist2 = dx * dx + dy * dy;
+                    // Rank the enemy in range
+                    if (enemy_type[j] == SQUARE) {
+                        if (dist2 &lt; bestDistSquare ||
+                            (dist2 == bestDistSquare &amp;&amp; j &gt; bestEnemySquare)) {
+                            bestDistSquare = dist2;
+                            bestEnemySquare = j;
+                        }
+                    } else if (enemy_type[j] == CIRCLE) {
+                        if (dist2 &lt; bestDistCircle ||
+                            (dist2 == bestDistCircle &amp;&amp; j &gt; bestEnemyCircle)) {
+                            bestDistCircle = dist2;
+                            bestEnemyCircle = j;
+                        }
+                    }
+                }
+            }
+        }
+        //Allways prefer squares to circles
+        if (bestEnemySquare != -1){
+            //Shoot by reducing global enemy health variable
+            enemy_health[bestEnemySquare] = enemy_health[bestEnemySquare] - TDamage[type];
+            // Set turret on cooldown
+            turret_on_cooldown[i] = true;   
+            if (enemy_health[bestEnemySquare] &lt;= 0){
+                //set enemy to dead if health is less than 0
+                num_dead_enem[SQUARE]++;
+                enemy_pos[bestEnemySquare]    = 0;
+                enemy_health[bestEnemySquare] = 0;
+            }
+        }
+        //If there are no close squares, attack best circle enemy
+        else if(bestEnemyCircle != -1){
+            enemy_health[bestEnemyCircle] = enemy_health[bestEnemyCircle] - TDamage[type];
+            turret_on_cooldown[i] = true;
+            if (enemy_health[bestEnemyCircle] &lt;= 0){
+                num_dead_enem[CIRCLE]++;
+                enemy_pos[bestEnemyCircle]    = 0;
+                enemy_health[bestEnemyCircle] = 0;
+            }
+        }
+
+    }
+    }
+}
+</declaration>
+		<location id="id0" x="365" y="-8">
+			<name x="355" y="-42">INIT</name>
+		</location>
+		<location id="id1" x="644" y="-8">
+			<name x="627" y="-59">IDLE</name>
+			<label kind="invariant" x="627" y="-42">t&lt;=1</label>
+		</location>
+		<location id="id2" x="952" y="-8">
+			<name x="901" y="8">CHECK_SHOT</name>
+			<committed/>
+		</location>
+		<location id="id3" x="1181" y="-8">
+			<committed/>
+		</location>
+		<location id="id4" x="493" y="161">
+			<name x="518" y="144">DONE</name>
+		</location>
+		<init ref="id0"/>
+		<transition id="id5">
+			<source ref="id1"/>
+			<target ref="id4"/>
+			<label kind="guard" x="25" y="93">num_dead_enem[CIRCLE] + num_dead_enem[SQUARE] == nEnemies</label>
+		</transition>
+		<transition id="id6">
+			<source ref="id2"/>
+			<target ref="id3"/>
+			<label kind="guard" x="969" y="-153">turretCanShoot()</label>
+			<label kind="assignment" x="969" y="-136">shootTurrets()</label>
+			<nail x="952" y="-161"/>
+			<nail x="1181" y="-161"/>
+		</transition>
+		<transition id="id7">
+			<source ref="id3"/>
+			<target ref="id1"/>
+			<label kind="assignment" x="850" y="178">t=0</label>
+			<nail x="1181" y="161"/>
+			<nail x="646" y="161"/>
+		</transition>
+		<transition id="id8">
+			<source ref="id2"/>
+			<target ref="id3"/>
+			<label kind="guard" x="994" y="0">!turretCanShoot()</label>
+		</transition>
+		<transition id="id9">
+			<source ref="id1"/>
+			<target ref="id2"/>
+			<label kind="guard" x="686" y="-76">t&gt;=1</label>
+			<label kind="assignment" x="686" y="-59">t=0,
+updateTurretClockAndCooldown()</label>
+		</transition>
+		<transition id="id10">
+			<source ref="id0"/>
+			<target ref="id1"/>
+			<label kind="synchronisation" x="391" y="0">init_done?</label>
+			<label kind="assignment" x="391" y="17">initialize(),
+t=0</label>
+		</transition>
+	</template>
+	<template>
+		<name>EnemyManager</name>
+		<declaration>clock t;
+
+//ENEMY VARIABLES
+int numSpawnedEnem[nEnemyTypes];
+int timeSinceLastSpawn[nEnemyTypes];   //keeps count of how long since last spawned enemy of a given type
+bool doneSpawning = false;             //Is true when all enemies are spawned
+int timeSinceLastMove[nEnemyTypes];    //keeps count of how long since last time a given type moved
+
+//Checks if it is possible to perform a spawn operation for any of the two enemy types
+//Returns true if the spawn counter is higher than the spawn delay
+bool spawnReady(){
+    return exists (i : int[0, nEnemyTypes-1]) timeSinceLastSpawn[i] &gt;= SpawnDelay[i];
+}
+
+//Checks if it possible to perform a move operation for any of the two enemy types
+//Returns true if the move counter is higher than the move delay
+bool moveReady(){
+    return exists (i : int[0, nEnemyTypes-1]) timeSinceLastMove[i] &gt;= Speed[i];
+}
+
+//increases move and spawn counter by one, this is done every time intervall
+void updateSpawnAndMoveCounter(){
+    //input: nEnemyTypes, timeSinceLastMove, doneSpawning, numSpawnedEnem, numOfType, timeSinceLastSpawn
+    int type; 
+    for (type=0; type&lt;nEnemyTypes; type++){
+        //Allways increase the move-counter
+        timeSinceLastMove[type]++;
+        //Only increase spawn counter if we are not done with spawning 
+        if(!doneSpawning &amp;&amp; numSpawnedEnem[type]&lt;numOfType[type]){
+            timeSinceLastSpawn[type]++;
+        }
+    }
+}
+
+//spawns enemy and resets the spawn counter for the spawned type
+void spawnEnem(){
+    //input: nEnemyTypes, timeSinceLastSpawn, SpawnDelay, numSpawnedEnem, numOfType, enemy_health, Health
+    int type;
+    int i = 0; //Keeps track of what idx we are at in the global enemy variable
+    for(type=0; type&lt;nEnemyTypes; type++){
+        if(timeSinceLastSpawn[type] &gt;= SpawnDelay[type] &amp;&amp; numSpawnedEnem[type] &lt; numOfType[type]){
+            enemy_health[i+numSpawnedEnem[type]] = Health[type]; //Enemy is spawned by setting its health in global variable enemy_health
+            timeSinceLastSpawn[type] = 0;
+            numSpawnedEnem[type]++; 
+        }
+        i = i + numOfType[type]; //Jump to next enemytype idx in global variable 
+    }
+}
+
+//Sets the doneSpawning variable if we have spawned all enemies
+void checkIfDoneSpawning(){
+    //input: nEnemyTypes, numSpawnedEnem, numOfType, doneSpawning
+    int type;
+    for(type = 0; type&lt;nEnemyTypes; type++){
+        if(numSpawnedEnem[type] &lt; numOfType[type]){
+            doneSpawning = false;
+            return;
+        }
+    } 
+    doneSpawning = true; 
+}
+
+//updates global position variable given a direction, direction is choosen at random in select statement. 
+//resets the move counter for the spawned type
+void updatePos(int dir){
+    //input: nEnemyTypes, timeSinceLastMove, Speed, numOfType, enemy_health, enemy_pos, crossroad, path, main_tower_pos, num_dead_enem, main_tower_HP, Damage
+    int type;
+    int start = 0; //keeps track of offset in global enemy variables for the given types
+    for(type=0; type&lt;nEnemyTypes; type++){
+        if(timeSinceLastMove[type] &gt;= Speed[type]){
+            //For each enemy in given type, move ahead one step
+            int i; 
+            timeSinceLastMove[type] = 0;
+            for (i = start; i &lt; start + numOfType[type]; i++){
+                //check for live enemies
+                if(enemy_health[i] &gt; 0){
+                    int idx_offset = 1; //for each enemy, we check the offset we need to jump in the path array. Default is 1.
+                    //check if we are at crossroad
+                    if(enemy_pos[i] == crossroad[0] || enemy_pos[i] == crossroad[1]){
+                        //check if we go right, only right walks require jumps in path array
+                        const int GO_RIGHT = 0;
+                        if(dir == GO_RIGHT){
+                            //check what crossroad we are at to determine offset in path array
+                            if(enemy_pos[i] == crossroad[0]){
+                                idx_offset = 23;        
+                            }else{
+                                idx_offset = 9;
+                            }
+                        }
+                    }
+                    //check if we are at main-tower and leave map if so
+                    else if(path[enemy_pos[i]] == main_tower_pos){
+                        enemy_pos[i]    = -1;
+                        enemy_health[i] = 0;
+                        num_dead_enem[type]++;
+                    }
+                    //update pos
+                    enemy_pos[i] = enemy_pos[i] + idx_offset;
+
+                    //if we arrived at main tower after moving, attack
+                    if (path[enemy_pos[i]] == main_tower_pos){
+                        main_tower_HP = main_tower_HP-Damage[type];
+                    }
+                } 
+            }
+        }
+        start = start + numOfType[type]; //Jump to next enemytype idx in global enemy array, it is sorted by type: a=[Circle, ... ,Circle,Square, ... ,Square]
+    }
+}
+
+    
+
+</declaration>
+		<location id="id11" x="1176" y="-484">
+			<name x="1147" y="-518">WAITING</name>
+			<label kind="invariant" x="1156" y="-535">t&lt;=1</label>
+		</location>
+		<location id="id12" x="896" y="-484">
+			<name x="886" y="-518">INIT</name>
+		</location>
+		<location id="id13" x="1465" y="-484">
+			<name x="1402" y="-467">UPDATE_POSITION</name>
+			<committed/>
+		</location>
+		<location id="id14" x="1708" y="-484">
+			<name x="1725" y="-510">CHECK_SPAWN</name>
+			<committed/>
+		</location>
+		<location id="id15" x="1708" y="-340">
+			<committed/>
+		</location>
+		<location id="id16" x="1929" y="-340">
+			<name x="1938" y="-374">UPDATE_SPAWN</name>
+			<committed/>
+		</location>
+		<location id="id17" x="926" y="-323">
+			<name x="916" y="-357">DONE</name>
+		</location>
+		<init ref="id12"/>
+		<transition id="id18">
+			<source ref="id11"/>
+			<target ref="id17"/>
+			<label kind="guard" x="527" y="-391">num_dead_enem[CIRCLE] + num_dead_enem[SQUARE] == nEnemies</label>
+		</transition>
+		<transition id="id19">
+			<source ref="id14"/>
+			<target ref="id16"/>
+			<label kind="guard" x="1734" y="-484">!doneSpawning</label>
+			<nail x="1921" y="-484"/>
+		</transition>
+		<transition id="id20">
+			<source ref="id16"/>
+			<target ref="id15"/>
+			<label kind="guard" x="1776" y="-246">spawnReady()</label>
+			<label kind="assignment" x="1776" y="-229">spawnEnem(),
+checkIfDoneSpawning()</label>
+			<nail x="1887" y="-255"/>
+			<nail x="1759" y="-255"/>
+		</transition>
+		<transition id="id21">
+			<source ref="id16"/>
+			<target ref="id15"/>
+			<label kind="guard" x="1768" y="-416">!spawnReady()</label>
+			<nail x="1878" y="-425"/>
+			<nail x="1759" y="-425"/>
+		</transition>
+		<transition id="id22">
+			<source ref="id13"/>
+			<target ref="id14"/>
+			<label kind="select" x="1521" y="-671">dir : int[0,1]</label>
+			<label kind="guard" x="1470" y="-569">moveReady()</label>
+			<label kind="assignment" x="1521" y="-654">updatePos(dir)</label>
+			<nail x="1462" y="-629"/>
+			<nail x="1708" y="-629"/>
+		</transition>
+		<transition id="id23">
+			<source ref="id15"/>
+			<target ref="id11"/>
+			<label kind="assignment" x="1337" y="-331">t=0</label>
+			<nail x="1176" y="-340"/>
+		</transition>
+		<transition id="id24">
+			<source ref="id14"/>
+			<target ref="id15"/>
+			<label kind="guard" x="1598" y="-416">doneSpawning</label>
+		</transition>
+		<transition id="id25">
+			<source ref="id13"/>
+			<target ref="id14"/>
+			<label kind="guard" x="1538" y="-476">!moveReady()</label>
+		</transition>
+		<transition id="id26">
+			<source ref="id11"/>
+			<target ref="id13"/>
+			<label kind="guard" x="1227" y="-544">t&gt;=1</label>
+			<label kind="assignment" x="1227" y="-527">t=0,
+updateSpawnAndMoveCounter()</label>
+		</transition>
+		<transition id="id27">
+			<source ref="id12"/>
+			<target ref="id11"/>
+			<label kind="synchronisation" x="955" y="-552">init_done?</label>
+			<label kind="assignment" x="955" y="-535">t=0,
+glob_clock = 0</label>
+		</transition>
+	</template>
+	<template>
+		<name>GameExecution</name>
+		<declaration>
+void init_game(){
+    int i;
+    for (i=0; i&lt;nEnemies;i++){
+        enemy_pos[i] = 0;             
+        enemy_health[i] = 0;
+        if(i &gt;= nCircles){  //Circles have the first indexes
+            enemy_type[i] = SQUARE;
+        }else{
+            enemy_type[i] = CIRCLE;
+        }
+    }
+}
+
+
+</declaration>
+		<location id="id28" x="-8" y="8">
+		</location>
+		<location id="id29" x="246" y="-42">
+			<name x="263" y="-51">Victory</name>
+		</location>
+		<location id="id30" x="246" y="59">
+			<name x="271" y="51">Loss</name>
+		</location>
+		<location id="id31" x="-289" y="8">
+			<name x="-299" y="-26">INIT</name>
+		</location>
+		<location id="id32" x="-144" y="8">
+			<committed/>
+		</location>
+		<init ref="id31"/>
+		<transition id="id33">
+			<source ref="id32"/>
+			<target ref="id28"/>
+			<label kind="synchronisation" x="-127" y="8">init_done!</label>
+		</transition>
+		<transition id="id34">
+			<source ref="id31"/>
+			<target ref="id32"/>
+			<label kind="assignment" x="-263" y="8">init_game()</label>
+		</transition>
+		<transition id="id35">
+			<source ref="id28"/>
+			<target ref="id29"/>
+			<label kind="guard" x="17" y="-25">num_dead_enem[CIRCLE] + num_dead_enem[SQUARE] == nEnemies &amp;&amp;
+main_tower_HP &gt; 0</label>
+			<nail x="-8" y="-42"/>
+		</transition>
+		<transition id="id36">
+			<source ref="id28"/>
+			<target ref="id30"/>
+			<label kind="guard" x="17" y="68">main_tower_HP &lt;= 0</label>
+			<nail x="-8" y="59"/>
+		</transition>
+	</template>
+	<system>// Place template instantiations here.
+enemyManager = EnemyManager();
+game = GameExecution();
+turretManager = TurretManager();
+
+// SYSTEM WITHOUT TURRETS
+//system enemyManager, game;
+
+// SYSTEM WITH TURRETS
+system enemyManager, game, turretManager;
+
+
+</system>
+	<queries>
+		<option key="--diagnostic" value="0"/>
+		<query>
+			<formula>A[] not deadlock or game.Victory or game.Loss</formula>
+			<comment>Choose in system declartion if you want to verify with or without turrets.
+The game never deadlocks or wins or lose</comment>
+			<result outcome="success" type="quality" timestamp="2025-07-23 17:42:57 +0200">
+				<option key="--diagnostic" value="0"/>
+			</result>
+		</query>
+		<query>
+			<formula>E&lt;&gt; (path[enemy_pos[0]][0] == 15 and path[enemy_pos[0]][1] == 4)</formula>
+			<comment>No turrets, enemie 0 can eventually make it to the Main Tower cell</comment>
+			<result outcome="success" type="quality" timestamp="2025-07-23 11:59:39 +0200">
+				<option key="--diagnostic" value="0"/>
+			</result>
+		</query>
+		<query>
+			<formula>E&lt;&gt; (path[enemy_pos[1]][0] == 15 and path[enemy_pos[1]][1] == 4)</formula>
+			<comment>No turrets, enemie 1 can eventually make it to the Main Tower cell</comment>
+			<result outcome="success" type="quality" timestamp="2025-07-23 17:36:55 +0200">
+				<option key="--diagnostic" value="0"/>
+			</result>
+		</query>
+		<query>
+			<formula>E&lt;&gt; (path[enemy_pos[2]][0] == 15 and path[enemy_pos[2]][1] == 4)</formula>
+			<comment>No turrets, enemie 2 can eventually make it to the Main Tower cell</comment>
+			<result outcome="success" type="quality" timestamp="2025-07-23 17:36:51 +0200">
+				<option key="--diagnostic" value="0"/>
+			</result>
+		</query>
+		<query>
+			<formula>E&lt;&gt; (path[enemy_pos[3]][0] == 15 and path[enemy_pos[3]][1] == 4)</formula>
+			<comment>No turrets, enemie 3 can eventually make it to the Main Tower cell</comment>
+			<result outcome="failure" type="quality" timestamp="2025-07-23 17:36:46 +0200">
+				<option key="--diagnostic" value="0"/>
+			</result>
+		</query>
+		<query>
+			<formula>E&lt;&gt; (path[enemy_pos[4]][0] == 15 and path[enemy_pos[4]][1] == 4)</formula>
+			<comment>No turrets, enemie 4 can eventually make it to the Main Tower cell</comment>
+			<result outcome="success" type="quality" timestamp="2025-07-23 11:47:43 +0200">
+				<option key="--diagnostic" value="0"/>
+			</result>
+		</query>
+		<query>
+			<formula>E&lt;&gt; (path[enemy_pos[5]][0] == 15 and path[enemy_pos[5]][1] == 4)</formula>
+			<comment>No turrets, enemie 5 can eventually make it to the Main Tower cell</comment>
+			<result outcome="success" type="quality" timestamp="2025-05-14 15:32:45 +0200">
+				<option key="--diagnostic" value="0"/>
+			</result>
+		</query>
+		<query>
+			<formula>A[] (( path[enemy_pos[0]][0] == 15
+        and path[enemy_pos[0]][1] == 4
+        imply glob_clock &lt;= 28
+      )
+    )</formula>
+			<comment>No turrets, Circle 0 arrives in at most n·c + spawn timem
+2*n + 2</comment>
+			<result outcome="success" type="quality" timestamp="2025-07-23 17:37:05 +0200">
+				<option key="--diagnostic" value="0"/>
+			</result>
+		</query>
+		<query>
+			<formula>A[] (( path[enemy_pos[1]][0] == 15
+        and path[enemy_pos[1]][1] == 4
+        imply glob_clock &lt;= 30
+      )
+    )</formula>
+			<comment>No turrets, Circle 1 arrives in at most n·c t + spawn timem
+</comment>
+			<result outcome="success" type="quality" timestamp="2025-07-23 17:43:00 +0200">
+				<option key="--diagnostic" value="0"/>
+			</result>
+		</query>
+		<query>
+			<formula>A[] (( path[enemy_pos[2]][0] == 15
+        and path[enemy_pos[2]][1] == 4
+        imply glob_clock &lt;= 32
+      )
+    )</formula>
+			<comment>No turrets, Circle 2 arrives in at most n·c + spawn timem
+</comment>
+			<result outcome="success" type="quality" timestamp="2025-07-23 11:08:08 +0200">
+				<option key="--diagnostic" value="0"/>
+			</result>
+		</query>
+		<query>
+			<formula>A[] (( path[enemy_pos[3]][0] == 15
+        and path[enemy_pos[3]][1] == 4
+        imply glob_clock &lt;= 81
+      )
+    )</formula>
+			<comment>No turrets, Square 0 arrives in at most n·c + spawn timem
+</comment>
+			<result outcome="success" type="quality" timestamp="2025-07-23 17:37:09 +0200">
+				<option key="--diagnostic" value="0"/>
+			</result>
+		</query>
+		<query>
+			<formula>A[] (( path[enemy_pos[4]][0] == 15
+        and path[enemy_pos[4]][1] == 4
+        imply glob_clock &lt;= 84
+      )
+    )</formula>
+			<comment>No turrets, Square 1 arrives in at most n·c + spawn timem
+</comment>
+			<result outcome="success" type="quality" timestamp="2025-07-23 17:37:17 +0200">
+				<option key="--diagnostic" value="0"/>
+			</result>
+		</query>
+		<query>
+			<formula>A[] (( path[enemy_pos[5]][0] == 15
+        and path[enemy_pos[5]][1] == 4
+        imply glob_clock &lt;= 87
+      )
+    )</formula>
+			<comment>No turrets, Square 2 arrives in at most n·c + spawn timem
+</comment>
+			<result outcome="success" type="quality" timestamp="2025-05-28 15:12:54 +0200">
+				<option key="--diagnostic" value="0"/>
+			</result>
+		</query>
+		<query>
+			<formula>A[] forall (i : int[0, nEnemies-1]) (enemy_health[i] &gt; 0 imply (enemy_pos[i] &gt;= 0 &amp;&amp; enemy_pos[i] &lt; nCells))</formula>
+			<comment>Verifies that all live enemies never leave the defined path by ensuring their position index is always valid. Since path array only holds correct values, we check that enemy_pos allways is an element inside the path array.</comment>
+			<result outcome="success" type="quality" timestamp="2025-07-23 17:43:05 +0200">
+				<option key="--diagnostic" value="0"/>
+			</result>
+		</query>
+		<query>
+			<formula>E&lt;&gt; game.Victory
+</formula>
+			<comment>Uncomment which configuration you want to verify in turret maneger.</comment>
+			<result outcome="success" type="quality" timestamp="2025-07-23 17:43:11 +0200">
+				<option key="--diagnostic" value="0"/>
+			</result>
+		</query>
+	</queries>
+</nta>
